@@ -43,6 +43,7 @@ const (
 type Downloader struct {
 	workers     int          // Number of concurrent workers
 	downloaded  int          // Count of successfully downloaded tracks
+	skipped     int          // Count of skipped tracks (already exist)
 	failed      int          // Count of failed downloads
 	mutex       sync.RWMutex // Mutex for thread-safe counter updates
 	retryCount  int          // Number of retry attempts for failed downloads
@@ -125,8 +126,13 @@ func (d *Downloader) worker(jobs <-chan Track, results chan<- Track, outputDir s
 		// Update counters and display progress (thread-safe)
 		d.mutex.Lock()
 		if result.Success {
-			d.downloaded++
-			fmt.Printf("✅ [%d/%d] Downloaded: %s\n", d.downloaded+d.failed, d.totalTracks, track.Raw)
+			if result.Skipped {
+				d.skipped++
+				fmt.Printf("⏭️  [%d/%d] Already exists: %s\n", d.downloaded+d.skipped+d.failed, d.totalTracks, track.Raw)
+			} else {
+				d.downloaded++
+				fmt.Printf("✅ [%d/%d] Downloaded: %s\n", d.downloaded+d.skipped+d.failed, d.totalTracks, track.Raw)
+			}
 		} else {
 			d.failed++
 			reasonStr := ""
@@ -138,7 +144,7 @@ func (d *Downloader) worker(jobs <-chan Track, results chan<- Track, outputDir s
 			case UnknownError:
 				reasonStr = "Unknown error"
 			}
-			fmt.Printf("❌ [%d/%d] Failed: %s [%s]\n", d.downloaded+d.failed, d.totalTracks, track.Raw, reasonStr)
+			fmt.Printf("❌ [%d/%d] Failed: %s [%s]\n", d.downloaded+d.skipped+d.failed, d.totalTracks, track.Raw, reasonStr)
 			results <- track // Send failed track to results channel
 		}
 		d.mutex.Unlock()
@@ -148,6 +154,7 @@ func (d *Downloader) worker(jobs <-chan Track, results chan<- Track, outputDir s
 // DownloadResult represents the result of a download attempt
 type DownloadResult struct {
 	Success bool
+	Skipped bool // True if file was skipped due to already existing
 	Reason  FailureReason
 	Message string
 }
@@ -162,7 +169,7 @@ func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult
 		extensions := []string{".mp3", ".webm", ".m4a", ".ogg", ".opus"}
 		for _, ext := range extensions {
 			if _, err := os.Stat(filepath.Join(outputDir, safeName+ext)); err == nil {
-				return DownloadResult{Success: true, Message: "File already exists"}
+				return DownloadResult{Success: true, Skipped: true, Message: "File already exists"}
 			}
 		}
 	}
@@ -387,20 +394,6 @@ func main() {
 
 	fmt.Printf("Found %d unique tracks\n", len(tracks))
 
-	// Count existing files to avoid re-downloading
-	existingCount := 0
-	for _, track := range tracks {
-		safeName := sanitizeFilename(fmt.Sprintf("%s - %s", track.Artist, track.Title))
-		outputPath := filepath.Join(outputDir, safeName+".mp3")
-		if _, err := os.Stat(outputPath); err == nil {
-			existingCount++
-		}
-	}
-
-	if existingCount > 0 {
-		fmt.Printf("Found %d existing files, skipping them\n", existingCount)
-	}
-
 	// Start concurrent download process
 	downloader := NewDownloader(4) // 4 concurrent downloads
 
@@ -416,8 +409,8 @@ func main() {
 	// Display final statistics
 	fmt.Printf("\nDownload completed:\n")
 	fmt.Printf("✅ Downloaded: %d\n", downloader.downloaded)
+	fmt.Printf("⏭️  Skipped (already existed): %d\n", downloader.skipped)
 	fmt.Printf("❌ Failed: %d\n", downloader.failed)
-	fmt.Printf("📁 Already existed: %d\n", existingCount)
 
 	// Save failed tracks for later retry
 	if len(failed) > 0 {
