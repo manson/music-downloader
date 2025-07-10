@@ -163,7 +163,7 @@ type DownloadResult struct {
 func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult {
 	safeName := sanitizeFilename(fmt.Sprintf("%s - %s", track.Artist, track.Title))
 
-	// Check if file already exists with any extension
+	// Check if file already exists with any extension (excluding .tmp files)
 	if d.skipExists {
 		// Check for common audio formats
 		extensions := []string{".mp3", ".webm", ".m4a", ".ogg", ".opus"}
@@ -174,9 +174,9 @@ func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult
 		}
 	}
 
-	// Prepare search query and output path template
+	// Prepare search query and output path template with .tmp extension
 	query := fmt.Sprintf("%s %s", track.Artist, track.Title)
-	templatePath := filepath.Join(outputDir, safeName+".%(ext)s")
+	templatePath := filepath.Join(outputDir, safeName+".%(ext)s.tmp")
 
 	// Prepare yt-dlp command arguments (removed --quiet and --no-warnings for detailed output)
 	args := []string{
@@ -184,7 +184,7 @@ func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult
 		"--audio-format", "mp3", // Prefer MP3 format
 		"--audio-quality", "192K", // Set quality to 192kbps
 		"--prefer-ffmpeg",        // Use ffmpeg for conversion if available
-		"--output", templatePath, // Output filename template
+		"--output", templatePath, // Output filename template with .tmp extension
 		"--no-playlist",        // Download single video only
 		"--max-downloads", "1", // Limit to first result
 		"--ignore-errors", // Continue on errors
@@ -207,24 +207,81 @@ func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult
 	// Log download attempt
 	fmt.Printf("🔍 Searching: %s\n", query)
 
-	// Execute yt-dlp command and capture output
+	// Execute yt-dlp command and capture output in real-time
 	cmd := exec.Command(ytDlpCmd[0], allArgs...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	cmdErr := cmd.Run()
+	// Set up pipes for real-time output monitoring
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return DownloadResult{Success: false, Reason: UnknownError, Message: fmt.Sprintf("Failed to create stdout pipe: %v", err)}
+	}
 
-	// Check if any audio file was downloaded
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return DownloadResult{Success: false, Reason: UnknownError, Message: fmt.Sprintf("Failed to create stderr pipe: %v", err)}
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return DownloadResult{Success: false, Reason: UnknownError, Message: fmt.Sprintf("Failed to start command: %v", err)}
+	}
+
+	// Monitor stdout for progress updates
+	var stdoutBuilder, stderrBuilder strings.Builder
+	var foundShown, downloadingShown bool
+
+	// Read stdout in real-time
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stdoutBuilder.WriteString(line + "\n")
+
+			// Check if track was found and show message immediately
+			if !foundShown && (strings.Contains(line, "Downloading") || strings.Contains(line, "Extracting") ||
+				strings.Contains(line, "[youtube]") || strings.Contains(line, "has already been downloaded")) {
+				fmt.Printf("📁 Found: %s\n", query)
+				foundShown = true
+			}
+
+			// Show downloading progress only once
+			if !downloadingShown && strings.Contains(line, "Downloading") && !strings.Contains(line, "Downloading webpage") {
+				fmt.Printf("⬇️  Downloading: %s\n", query)
+				downloadingShown = true
+			}
+		}
+	}()
+
+	// Read stderr
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrBuilder.WriteString(line + "\n")
+		}
+	}()
+
+	// Wait for command to finish
+	cmdErr := cmd.Wait()
+
+	// Check if any temporary audio file was downloaded and rename it
 	extensions := []string{".mp3", ".webm", ".m4a", ".ogg", ".opus"}
 	for _, ext := range extensions {
-		if _, err := os.Stat(filepath.Join(outputDir, safeName+ext)); err == nil {
+		tempPath := filepath.Join(outputDir, safeName+ext+".tmp")
+		if _, err := os.Stat(tempPath); err == nil {
+			// Rename from .tmp to final extension
+			finalPath := filepath.Join(outputDir, safeName+ext)
+			if err := os.Rename(tempPath, finalPath); err != nil {
+				// If rename fails, remove temp file and return error
+				os.Remove(tempPath)
+				return DownloadResult{Success: false, Reason: UnknownError, Message: fmt.Sprintf("Failed to rename temp file: %v", err)}
+			}
 			return DownloadResult{Success: true, Message: "Downloaded successfully"}
 		}
 	}
 
 	// Analyze failure reason
-	errorOutput := stderr.String()
+	errorOutput := stderrBuilder.String()
 	reason, message := analyzeFailure(errorOutput, cmdErr)
 
 	return DownloadResult{Success: false, Reason: reason, Message: message}
@@ -373,6 +430,28 @@ func checkYtDlp() bool {
 	return testCmd.Run() == nil
 }
 
+// cleanupTempFiles removes all temporary files (.tmp extension) from output directory
+func cleanupTempFiles(outputDir string) {
+	pattern := filepath.Join(outputDir, "*.tmp")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		log.Printf("Error finding temp files: %v", err)
+		return
+	}
+
+	for _, file := range matches {
+		if err := os.Remove(file); err != nil {
+			log.Printf("Error removing temp file %s: %v", file, err)
+		} else {
+			fmt.Printf("🗑️  Removed incomplete download: %s\n", filepath.Base(file))
+		}
+	}
+
+	if len(matches) > 0 {
+		fmt.Printf("Cleaned up %d incomplete downloads\n", len(matches))
+	}
+}
+
 // main function orchestrates the entire download process
 func main() {
 	// Verify yt-dlp is installed
@@ -385,6 +464,9 @@ func main() {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		log.Fatal("Failed to create music directory:", err)
 	}
+
+	// Clean up any incomplete downloads from previous runs
+	cleanupTempFiles(outputDir)
 
 	// Read and parse playlist
 	tracks, err := readPlaylist("vk-playlist.txt")
