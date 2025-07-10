@@ -56,16 +56,6 @@ go build -o music-downloader.exe main.go
 ./music-downloader.exe
 ```
 
-### Тестирование
-
-Для тестирования приложения с небольшим плейлистом:
-
-```bash
-cd test
-go run test_runner.go
-```
-
-Это загрузит 5 популярных песен для проверки работы приложения.
 
 ## Решение проблем
 
