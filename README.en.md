@@ -1,6 +1,6 @@
 # Music Downloader
 
-Application for downloading music from a playlist.
+Application for downloading music from a playlist. I usually listen to a selection of music from VK on my desktop at work. But sometimes I want to listen on the go from my smartphone, however, VK only allows listening for half an hour a day for free on a smartphone; for the rest, you have to pay for a subscription. But this happens rarely, so there's no point in paying. I haven't found any normal VK players that bypass its rules, nor would I want to use such a thing. That's why I wrote this program. You export a playlist from VK to a text file, feed it to this program, and it searches for these entries on YouTube and downloads the audio to a separate folder. Of course, because it searches by title and author, and they can be named arbitrarily on VK (e.g., "!!!! VERY COOL SONG !!!"), it might not be found on YouTube or something else might be found instead, but these are acceptable errors for me. My playlist of one and a half thousand works is also in the repo. Of couse you can fill it with your own data in form of "Singer - Song name"
 
 ## Requirements
 
