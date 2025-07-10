@@ -258,6 +258,18 @@ func (d *Downloader) downloadTrack(track Track, outputDir string) DownloadResult
 		for scanner.Scan() {
 			line := scanner.Text()
 			stderrBuilder.WriteString(line + "\n")
+
+			// Also check stderr for progress messages
+			if !foundShown && (strings.Contains(line, "Downloading") || strings.Contains(line, "Extracting") ||
+				strings.Contains(line, "[youtube]") || strings.Contains(line, "has already been downloaded")) {
+				fmt.Printf("📁 Found: %s\n", query)
+				foundShown = true
+			}
+
+			if !downloadingShown && strings.Contains(line, "Downloading") && !strings.Contains(line, "Downloading webpage") {
+				fmt.Printf("⬇️  Downloading: %s\n", query)
+				downloadingShown = true
+			}
 		}
 	}()
 
