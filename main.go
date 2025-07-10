@@ -41,24 +41,27 @@ const (
 
 // Downloader handles concurrent downloading of music tracks
 type Downloader struct {
-	workers     int          // Number of concurrent workers
-	downloaded  int          // Count of successfully downloaded tracks
-	skipped     int          // Count of skipped tracks (already exist)
-	failed      int          // Count of failed downloads
-	mutex       sync.RWMutex // Mutex for thread-safe counter updates
-	retryCount  int          // Number of retry attempts for failed downloads
-	skipExists  bool         // Whether to skip existing files
-	proxy       string       // Proxy URL (empty string means no proxy)
-	totalTracks int          // Total number of tracks to download
+	workers          int            // Number of concurrent workers
+	downloaded       int            // Count of successfully downloaded tracks
+	skipped          int            // Count of skipped tracks (already exist)
+	failed           int            // Count of failed downloads
+	mutex            sync.RWMutex   // Mutex for thread-safe counter updates
+	retryCount       int            // Number of retry attempts for failed downloads
+	skipExists       bool           // Whether to skip existing files
+	proxy            string         // Proxy URL (empty string = no proxy)
+	totalTracks      int            // Total number of tracks to download
+	failedTracksChan chan Track     // Channel to send failed tracks for immediate saving
+	saveWg           sync.WaitGroup // WaitGroup for the saving goroutine
 }
 
 // NewDownloader creates a new downloader with specified number of workers
 func NewDownloader(workers int) *Downloader {
 	return &Downloader{
-		workers:    workers,
-		retryCount: 2,         // Retry failed downloads up to 2 times
-		skipExists: true,      // Skip files that already exist
-		proxy:      PROXY_URL, // Use configured proxy (empty string = no proxy)
+		workers:          workers,
+		retryCount:       2,                // Retry failed downloads up to 2 times
+		skipExists:       true,             // Skip files that already exist
+		proxy:            PROXY_URL,        // Use configured proxy (empty string = no proxy)
+		failedTracksChan: make(chan Track), // Initialize the channel
 	}
 }
 
@@ -71,13 +74,17 @@ func (d *Downloader) SetProxy(proxyURL string) {
 func (d *Downloader) Download(tracks []Track, outputDir string) []Track {
 	d.totalTracks = len(tracks) // Set total tracks for progress display
 	jobs := make(chan Track, len(tracks))
-	results := make(chan Track, len(tracks))
-	var wg sync.WaitGroup
+	// No longer need results channel as failures are streamed
+	var wg sync.WaitGroup // Use a local waitgroup for workers
+
+	// Start a goroutine to continuously save failed tracks
+	d.saveWg.Add(1)
+	go d.streamSaveFailedTracks("vk-playlist-failed.txt")
 
 	// Start worker goroutines
 	for w := 0; w < d.workers; w++ {
 		wg.Add(1)
-		go d.worker(jobs, results, outputDir, &wg)
+		go d.worker(jobs, outputDir, &wg)
 	}
 
 	// Send all tracks as jobs
@@ -88,25 +95,20 @@ func (d *Downloader) Download(tracks []Track, outputDir string) []Track {
 		close(jobs)
 	}()
 
-	// Wait for all workers to finish and close results channel
+	// Wait for all workers to finish and close the failed tracks channel
 	go func() {
 		wg.Wait()
-		close(results)
+		close(d.failedTracksChan) // Signal that no more failed tracks will be sent
 	}()
 
-	// Collect failed tracks from results channel
-	var failed []Track
-	for result := range results {
-		if result.Raw != "" {
-			failed = append(failed, result)
-		}
-	}
+	// Wait for the failed tracks saving goroutine to finish
+	d.saveWg.Wait()
 
-	return failed
+	return nil // Failed tracks are now saved directly, no return needed here
 }
 
 // worker processes tracks from jobs channel with retry logic
-func (d *Downloader) worker(jobs <-chan Track, results chan<- Track, outputDir string, wg *sync.WaitGroup) {
+func (d *Downloader) worker(jobs <-chan Track, outputDir string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for track := range jobs {
@@ -145,9 +147,29 @@ func (d *Downloader) worker(jobs <-chan Track, results chan<- Track, outputDir s
 				reasonStr = "Unknown error"
 			}
 			fmt.Printf("❌ [%d/%d] Failed: %s [%s]\n", d.downloaded+d.skipped+d.failed, d.totalTracks, track.Raw, reasonStr)
-			results <- track // Send failed track to results channel
+			d.failedTracksChan <- track // Send failed track to the channel
 		}
 		d.mutex.Unlock()
+	}
+}
+
+// streamSaveFailedTracks continuously writes failed tracks to the specified file
+func (d *Downloader) streamSaveFailedTracks(filename string) {
+	defer d.saveWg.Done()
+
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Failed to open failed tracks file for streaming: %v", err)
+		return
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush() // Ensure any buffered data is written when done
+
+	for track := range d.failedTracksChan {
+		fmt.Fprintln(writer, track.Raw)
+		writer.Flush() // Flush after each write for immediate persistence
 	}
 }
 
@@ -498,7 +520,7 @@ func main() {
 		fmt.Printf("Direct connection (no proxy)\n")
 	}
 
-	failed := downloader.Download(tracks, outputDir)
+	downloader.Download(tracks, outputDir)
 
 	// Display final statistics
 	fmt.Printf("\nDownload completed:\n")
@@ -506,12 +528,10 @@ func main() {
 	fmt.Printf("⏭️  Skipped (already existed): %d\n", downloader.skipped)
 	fmt.Printf("❌ Failed: %d\n", downloader.failed)
 
-	// Save failed tracks for later retry
-	if len(failed) > 0 {
-		if err := saveFailedTracks(failed, "vk-playlist-failed.txt"); err != nil {
-			log.Printf("Failed to save failed tracks: %v", err)
-		} else {
-			fmt.Printf("Failed tracks saved to vk-playlist-failed.txt\n")
-		}
-	}
+	// No longer call saveFailedTracks here, it's streamed
+	// if len(failed) > 0 {
+	// 	if err := saveFailedTracks(failed, "vk-playlist-failed.txt"); err != nil {
+	// 		log.Printf("Failed to save failed tracks: %v", err)
+	// 	}
+	// }
 }
